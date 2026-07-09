@@ -23,7 +23,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Byte-compile sources
-        run: python -m py_compile main.py check_google.py src/config.py src/google_auth.py src/foundry_agent.py
+        run: python -m py_compile main.py check_google.py check_drivemcp.py src/config.py src/google_auth.py src/foundry_agent.py
 
       - name: Import smoke test (no network / no secrets)
         run: python -c "import src.config, src.google_auth, src.foundry_agent; print('imports OK')"

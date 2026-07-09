@@ -183,6 +183,66 @@ def _read_client_info(path: str) -> Dict[str, str]:
     }
 
 
+def _tokeninfo(token: str) -> Dict[str, Any]:
+    """Ask Google exactly what this access token carries.
+
+    Returns the parsed tokeninfo document (scopes, azp/aud = the OAuth client
+    that minted it, the account email, and expiry). This is the ground truth:
+    if ``drive.readonly`` is missing here, the consent didn't actually grant it,
+    no matter what the Data Access page shows.
+    """
+    try:
+        resp = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"access_token": token},
+            timeout=30,
+        )
+    except requests.RequestException as exc:  # pragma: no cover - network only
+        print(f"  tokeninfo: request failed ({exc})")
+        return {}
+    if resp.status_code != 200:
+        print(f"  tokeninfo: HTTP {resp.status_code} {resp.text[:200]}")
+        return {}
+    info = resp.json()
+    scopes = (info.get("scope") or "").split()
+    print("Token introspection (Google tokeninfo):")
+    print(f"  client (azp): {info.get('azp', '?')}")
+    if info.get("email"):
+        print(f"  account:      {info.get('email')}")
+    print(f"  expires_in:   {info.get('expires_in', '?')} s")
+    print("  scopes:")
+    for scope in scopes:
+        print(f"    - {scope}")
+    for needed in (
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file",
+    ):
+        mark = "OK " if needed in scopes else "MISSING"
+        print(f"  [{mark}] {needed}")
+    print()
+    return info
+
+
+def _try_tool(client: "DriveMCPClient", name: str, args: Dict[str, Any]) -> bool:
+    """Call one tool and print a compact pass/fail line. Returns True on success."""
+    print(f"      tools/call {name}  args={json.dumps(args)}")
+    try:
+        result = client.call_tool(name, args)
+    except MCPError as exc:
+        print(f"        -> transport error: {exc}")
+        return False
+    blocks = [
+        b.get("text", "")
+        for b in result.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    if result.get("isError"):
+        print("        -> DENIED: " + (" ".join(blocks) or json.dumps(result)[:400]))
+        return False
+    print("        -> OK: " + (" ".join(blocks)[:400] or json.dumps(result)[:400]))
+    return True
+
+
 def main() -> None:
     query = sys.argv[1] if len(sys.argv) > 1 else "report"
     url = os.environ.get("MCP_SERVER_URL", DEFAULT_MCP_SERVER_URL).strip()
@@ -211,6 +271,8 @@ def main() -> None:
     )
     print("Got Google access token (…%s).\n" % token[-6:])
 
+    _tokeninfo(token)
+
     client = DriveMCPClient(url, token)
 
     print("[1/3] initialize")
@@ -238,6 +300,16 @@ def main() -> None:
     if result.get("isError"):
         print("      RESULT: tool reported an error:")
         print("      " + ("\n      ".join(text_blocks) or json.dumps(result)[:1000]))
+        print("      raw result JSON:")
+        print("      " + json.dumps(result)[:1200])
+
+        # Is the WHOLE data plane denied, or only search_files? list_recent_files
+        # needs no query and exercises a different code path. If it also fails,
+        # the denial is account/project/preview-wide (not a search-specific or
+        # scope-specific problem).
+        print("\n      Comparison: trying other data-plane tools with the same token")
+        _try_tool(client, "list_recent_files", {})
+        any_ok = _try_tool(client, "list_recent_files", {"pageSize": 5})
 
         # The token was accepted for initialize + tools/list, so this is a
         # data-plane authorization denial. A common cause is a missing quota
