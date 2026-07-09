@@ -243,6 +243,72 @@ def _try_tool(client: "DriveMCPClient", name: str, args: Dict[str, Any]) -> bool
     return True
 
 
+def _probe_raw_drive_api(token: str, quota_project: Optional[str] = None) -> None:
+    """Call the standard Drive API v3 directly with the same token (no MCP).
+
+    This is the decisive isolation test:
+      * raw Drive WORKS but MCP does not -> the block is specific to the Drive
+        MCP server (restricted preview / your project not enrolled). We should
+        pivot off drivemcp and read Drive directly or via a Foundry connector.
+      * raw Drive is ALSO denied         -> the token/account/project cannot read
+        Drive at all (Workspace admin policy, or the Drive API call is attributed
+        to a project where it is not enabled). Fix that before anything else.
+
+    ``about.get`` also surfaces the account behind the token, so we learn whether
+    it is a personal @gmail.com or an org-managed Workspace account.
+    """
+    print("Direct Drive API v3 probe (bypasses the MCP server entirely):")
+    headers = {"Authorization": "Bearer " + token}
+    if quota_project:
+        headers["X-Goog-User-Project"] = quota_project
+
+    try:
+        about = requests.get(
+            "https://www.googleapis.com/drive/v3/about",
+            params={"fields": "user(displayName,emailAddress)"},
+            headers=headers,
+            timeout=30,
+        )
+        if about.status_code == 200:
+            user = about.json().get("user", {})
+            print(
+                f"  about.get:  HTTP 200  account: "
+                f"{user.get('emailAddress', '?')} ({user.get('displayName', '')})"
+            )
+        else:
+            print(f"  about.get:  HTTP {about.status_code}  {about.text[:400]}")
+    except requests.RequestException as exc:  # pragma: no cover - network only
+        print(f"  about.get:  request failed ({exc})")
+
+    try:
+        files = requests.get(
+            "https://www.googleapis.com/drive/v3/files",
+            params={"pageSize": 5, "fields": "files(id,name)"},
+            headers=headers,
+            timeout=30,
+        )
+        if files.status_code == 200:
+            names = [f.get("name", "?") for f in files.json().get("files", [])]
+            print(
+                f"  files.list: HTTP 200  {len(names)} file(s): "
+                f"{', '.join(names) or '(none)'}"
+            )
+            print(
+                "  => RAW DRIVE API WORKS. Your token/account CAN read Drive, so the\n"
+                "     denial is specific to the Drive MCP server (drivemcp.googleapis.com)."
+            )
+        else:
+            print(f"  files.list: HTTP {files.status_code}  {files.text[:600]}")
+            print(
+                "  => RAW DRIVE API ALSO DENIED. The token/account/project cannot read\n"
+                "     Drive at all -- fix this (Workspace admin app access, or the Drive\n"
+                "     API's quota project) before worrying about the MCP server."
+            )
+    except requests.RequestException as exc:  # pragma: no cover - network only
+        print(f"  files.list: request failed ({exc})")
+    print()
+
+
 def main() -> None:
     query = sys.argv[1] if len(sys.argv) > 1 else "report"
     url = os.environ.get("MCP_SERVER_URL", DEFAULT_MCP_SERVER_URL).strip()
@@ -272,6 +338,7 @@ def main() -> None:
     print("Got Google access token (…%s).\n" % token[-6:])
 
     _tokeninfo(token)
+    _probe_raw_drive_api(token)
 
     client = DriveMCPClient(url, token)
 
