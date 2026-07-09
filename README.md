@@ -169,6 +169,12 @@ python check_google.py
 
 You should see `HTTP 200` and a few of your file names.
 
+> `check_google.py` talks to the regular Drive REST API (`drive.googleapis.com`).
+> To test the **MCP** endpoint (`drivemcp.googleapis.com`) the agent actually
+> uses — bypassing Foundry entirely — run `python check_drivemcp.py "search term"`.
+> If that probe reproduces a *"caller does not have permission"* error, the fix is
+> in your Google Cloud project, not in Foundry (see [Troubleshooting](#troubleshooting)).
+
 **3. Ask a question:**
 
 ```bash
@@ -233,6 +239,7 @@ For read-only Q&A, a good allow-list is
 foundry-gdrive-mcp-agent/
 ├── main.py               # CLI: auth / ask / chat
 ├── check_google.py       # Diagnostic: verify Drive token directly
+├── check_drivemcp.py     # Diagnostic: probe the Drive MCP endpoint directly
 ├── requirements.txt
 ├── .env.example
 └── src/
@@ -264,6 +271,19 @@ foundry-gdrive-mcp-agent/
   (`azure-ai-projects>=2.3.0`, which pulls in `openai`). It is **not** compatible
   with `azure-ai-projects` 1.x. Reinstall into a clean venv with
   `pip install -r requirements.txt`.
+- **`tool_user_error` / "An error occurred invoking 'search_files': The caller
+  does not have permission"** → Foundry reached Google and forwarded your token
+  (the model even discovered the tool names), but **Google** denied the actual
+  call. This is a Cloud-project setup issue. Run `python check_drivemcp.py "test"`
+  to reproduce it without Foundry, then, **in the same project that owns your OAuth
+  client**: (1) enable the MCP service —
+  `gcloud services enable drivemcp.googleapis.com --project=PROJECT_ID` (it is a
+  **separate** service from `drive.googleapis.com`, and both must be enabled);
+  (2) confirm the OAuth client and both enabled APIs live in that **same** project;
+  (3) Google documents only **Web application** OAuth clients for Drive MCP — if
+  yours is a Desktop app, create a Web application client, add redirect URI
+  `http://localhost:8765/`, set `GOOGLE_OAUTH_PORT=8765`, re-download
+  `credentials.json`, delete `token.json`, and run `python main.py auth` again.
 - **`invalid_payload` / "Headers that can include sensitive information are not
   allowed in the headers property for MCP tools. Use project_connection_id
   instead."** → an older build put the Google token in the MCP tool `headers`.
