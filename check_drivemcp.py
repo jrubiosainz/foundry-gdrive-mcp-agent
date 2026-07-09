@@ -39,9 +39,10 @@ class MCPError(RuntimeError):
 class DriveMCPClient:
     """Minimal MCP Streamable-HTTP client, just enough to probe Drive."""
 
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, token: str, quota_project: Optional[str] = None):
         self.url = url
         self.token = token
+        self.quota_project = quota_project
         self.session = requests.Session()
         self.mcp_session_id: Optional[str] = None
         self.protocol_version: str = "2025-06-18"
@@ -52,6 +53,8 @@ class DriveMCPClient:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        if self.quota_project:
+            headers["X-Goog-User-Project"] = self.quota_project
         if self.mcp_session_id:
             headers["Mcp-Session-Id"] = self.mcp_session_id
         if self.protocol_version:
@@ -155,14 +158,47 @@ def _build_search_args(tool: Optional[Dict[str, Any]], query: str) -> Dict[str, 
     return {"query": query}
 
 
+def _read_client_info(path: str) -> Dict[str, str]:
+    """Extract OAuth client type / project / client_id from credentials.json."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    # Desktop clients live under "installed", web clients under "web".
+    if "installed" in data:
+        block, kind = data["installed"], "Desktop app (installed)"
+    elif "web" in data:
+        block, kind = data["web"], "Web application"
+    else:
+        block, kind = {}, "unknown"
+    return {
+        "type": kind,
+        "project_id": block.get("project_id", ""),
+        "client_id": block.get("client_id", ""),
+    }
+
+
 def main() -> None:
     query = sys.argv[1] if len(sys.argv) > 1 else "report"
     url = os.environ.get("MCP_SERVER_URL", DEFAULT_MCP_SERVER_URL).strip()
+    creds_path = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRETS", "credentials.json")
 
     print(f"Google Drive MCP direct probe\n  endpoint: {url}\n  query:    {query!r}\n")
 
+    client_info = _read_client_info(creds_path)
+    if client_info:
+        print("OAuth client (from %s):" % creds_path)
+        print(f"  type:       {client_info.get('type', '?')}")
+        print(f"  project_id: {client_info.get('project_id', '?')}")
+        cid = client_info.get("client_id", "")
+        print(f"  client_id:  {cid[:28]}… " if cid else "  client_id:  ?")
+        if "Web application" not in client_info.get("type", ""):
+            print("  NOTE: Google documents ONLY 'Web application' OAuth clients for Drive MCP.")
+        print()
+
     token = get_access_token(
-        os.environ.get("GOOGLE_OAUTH_CLIENT_SECRETS", "credentials.json"),
+        creds_path,
         os.environ.get("GOOGLE_TOKEN_PATH", "token.json"),
         oauth_port=int(os.environ.get("GOOGLE_OAUTH_PORT", "0")),
         interactive=True,
@@ -196,6 +232,42 @@ def main() -> None:
     if result.get("isError"):
         print("      RESULT: tool reported an error:")
         print("      " + ("\n      ".join(text_blocks) or json.dumps(result)[:1000]))
+
+        # The token was accepted for initialize + tools/list, so this is a
+        # data-plane authorization denial. A common cause is a missing quota
+        # project. Retry once with X-Goog-User-Project to test that theory.
+        project_id = client_info.get("project_id") if client_info else None
+        if project_id:
+            print(
+                f"\n      Retrying with quota project header "
+                f"X-Goog-User-Project: {project_id} ..."
+            )
+            client.quota_project = project_id
+            client.mcp_session_id = None  # force a fresh session for the retry
+            client.initialize()
+            retry = client.call_tool("search_files", args)
+            retry_blocks = [
+                b.get("text", "")
+                for b in retry.get("content", [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            if retry.get("isError"):
+                print("      Still denied WITH quota project header:")
+                print("      " + ("\n      ".join(retry_blocks) or json.dumps(retry)[:800]))
+                print(
+                    "      => Not a quota-project issue. Most likely the Drive API isn't"
+                    " enabled in this project, or the OAuth client type is rejected."
+                )
+            else:
+                print("      SUCCESS once X-Goog-User-Project was sent!")
+                print("      " + ("\n      ".join(retry_blocks) or json.dumps(retry)[:800]))
+                print(
+                    "      => It's a QUOTA-PROJECT issue. The raw user token had no quota"
+                    " project attached. Foundry can't send this header, so the fix is to"
+                    " use a Foundry connection (MCP_PROJECT_CONNECTION_ID) or the native"
+                    " connector_googledrive, OR ensure the Drive API is enabled in the"
+                    " OAuth client's own project so it becomes the default quota project."
+                )
         raise MCPError("search_files returned isError=true")
     print("      RESULT:")
     print("      " + ("\n      ".join(text_blocks) or json.dumps(result, indent=2)[:1500]))
