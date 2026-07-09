@@ -172,10 +172,14 @@ def _read_client_info(path: str) -> Dict[str, str]:
         block, kind = data["web"], "Web application"
     else:
         block, kind = {}, "unknown"
+    client_id = block.get("client_id", "")
+    # A Google client_id is "<project_number>-<random>.apps.googleusercontent.com".
+    project_number = client_id.split("-", 1)[0] if "-" in client_id else ""
     return {
         "type": kind,
         "project_id": block.get("project_id", ""),
-        "client_id": block.get("client_id", ""),
+        "project_number": project_number,
+        "client_id": client_id,
     }
 
 
@@ -189,12 +193,14 @@ def main() -> None:
     client_info = _read_client_info(creds_path)
     if client_info:
         print("OAuth client (from %s):" % creds_path)
-        print(f"  type:       {client_info.get('type', '?')}")
-        print(f"  project_id: {client_info.get('project_id', '?')}")
+        print(f"  type:           {client_info.get('type', '?')}")
+        print(f"  project_id:     {client_info.get('project_id') or '(missing from JSON)'}")
+        print(f"  project_number: {client_info.get('project_number') or '?'}  (from client_id)")
         cid = client_info.get("client_id", "")
-        print(f"  client_id:  {cid[:28]}… " if cid else "  client_id:  ?")
+        print(f"  client_id:      {cid[:32]}… " if cid else "  client_id:      ?")
         if "Web application" not in client_info.get("type", ""):
             print("  NOTE: Google documents ONLY 'Web application' OAuth clients for Drive MCP.")
+            print("        A Desktop client can list tools but is likely rejected on data calls.")
         print()
 
     token = get_access_token(
@@ -236,7 +242,9 @@ def main() -> None:
         # The token was accepted for initialize + tools/list, so this is a
         # data-plane authorization denial. A common cause is a missing quota
         # project. Retry once with X-Goog-User-Project to test that theory.
-        project_id = client_info.get("project_id") if client_info else None
+        project_id = ""
+        if client_info:
+            project_id = client_info.get("project_id") or client_info.get("project_number") or ""
         if project_id:
             print(
                 f"\n      Retrying with quota project header "
