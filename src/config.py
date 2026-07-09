@@ -37,7 +37,7 @@ class Settings:
     google_client_secrets_file: str = "credentials.json"
     google_token_file: str = "token.json"
     google_oauth_port: int = 0
-    require_approval: str = "always"
+    require_approval: str = "never"
     agent_name: str = "gdrive-mcp-agent"
     allowed_tools: List[str] = field(default_factory=list)
 
@@ -77,7 +77,7 @@ class Settings:
             ).strip(),
             google_token_file=os.environ.get("GOOGLE_TOKEN_PATH", "token.json").strip(),
             google_oauth_port=int(os.environ.get("GOOGLE_OAUTH_PORT", "0")),
-            require_approval=os.environ.get("MCP_REQUIRE_APPROVAL", "always").strip().lower(),
+            require_approval=os.environ.get("MCP_REQUIRE_APPROVAL", "never").strip().lower(),
             agent_name=os.environ.get("AGENT_NAME", "gdrive-mcp-agent").strip(),
             allowed_tools=allowed_tools,
         )

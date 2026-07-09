@@ -9,8 +9,9 @@ language about your own documents:
 > _"Summarize the file called Onboarding Checklist."_
 > _"List my most recently modified spreadsheets."_
 
-Built with the **Foundry Python SDK** (`azure-ai-projects` + `azure-ai-agents`)
-and the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) tool.
+Built with the new **Microsoft Foundry SDK** — [`azure-ai-projects`](https://pypi.org/project/azure-ai-projects/)
+2.x *prompt agents* plus the OpenAI-compatible **Responses API** — and the
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/) tool.
 
 ---
 
@@ -28,11 +29,14 @@ flowchart LR
 
 1. `main.py` runs a local **Google OAuth 2.0** flow and caches an access/refresh
    token (`token.json`).
-2. It creates a Foundry agent whose only tool is the **Google Drive MCP server**.
+2. It publishes a Foundry **prompt agent** (`agents.create_version`) whose only
+   tool is the **Google Drive MCP server**.
 3. On every turn, the app injects a **fresh Google access token** as the
    `Authorization: Bearer …` header the MCP server expects.
-4. The model decides when to call Drive tools (`search_files`,
-   `read_file_content`, …); the app approves those calls and returns the answer.
+4. It chats through the OpenAI-compatible **Responses API** over a
+   `conversation`, so multi-turn context is kept. The model decides when to call
+   Drive tools (`search_files`, `read_file_content`, …); the service runs them
+   and returns the answer.
 
 ### How authentication really works (important)
 
@@ -176,7 +180,7 @@ python main.py chat
 
 ```
 you> what files did I edit most recently?
-agent> approving MCP tool call: list_recent_files
+agent> Created agent version: gdrive-mcp-agent (v1)
 agent> Your three most recently modified files are …
 ```
 
@@ -212,7 +216,7 @@ For read-only Q&A, a good allow-list is
 | `MCP_SERVER_URL` | | `https://drivemcp.googleapis.com/mcp/v1` | Drive MCP endpoint |
 | `MCP_SERVER_LABEL` | | `google_drive` | Label for the tool |
 | `MCP_ALLOWED_TOOLS` | | _(all)_ | Comma-separated allow-list |
-| `MCP_REQUIRE_APPROVAL` | | `always` | `always` (auto-approve + log) or `never` |
+| `MCP_REQUIRE_APPROVAL` | | `never` | `never` (service runs tools) or `always` (app auto-approves + logs) |
 | `GOOGLE_OAUTH_CLIENT_SECRETS` | | `credentials.json` | OAuth client JSON path |
 | `GOOGLE_TOKEN_PATH` | | `token.json` | Cached token path |
 | `GOOGLE_OAUTH_PORT` | | `0` | Local OAuth callback port |
@@ -253,9 +257,14 @@ foundry-gdrive-mcp-agent/
   application client instead, add an authorized redirect URI such as
   `http://localhost:PORT/` (matching `GOOGLE_OAUTH_PORT`), and set
   `GOOGLE_OAUTH_PORT` to that fixed port.
-- **Package/import errors** → the Foundry MCP features need the pinned
-  **pre-release** SDKs in `requirements.txt` (`azure-ai-projects==1.1.0b4`,
-  `azure-ai-agents==1.2.0b6`). Reinstall with `pip install -r requirements.txt`.
+- **Package/import errors** → this project uses the **new Foundry projects API**
+  (`azure-ai-projects>=2.3.0`, which pulls in `openai`). It is **not** compatible
+  with `azure-ai-projects` 1.x. Reinstall into a clean venv with
+  `pip install -r requirements.txt`.
+- **`server_error` / "Sorry, something went wrong" on a run** → almost always the
+  MCP call failing server-side: an expired/invalid Google token, the Drive/DriveMCP
+  APIs not enabled, or the OAuth client type being rejected (see the Desktop-app
+  note above). Run `python check_google.py` to confirm the token still works.
 
 ---
 
@@ -284,9 +293,10 @@ foundry-gdrive-mcp-agent/
 
 ## References
 
+- [Quickstart: Create a prompt agent (new Foundry SDK)](https://learn.microsoft.com/azure/foundry/agents/quickstarts/prompt-agent?tabs=python)
 - [Connect Foundry agents to MCP servers](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/model-context-protocol)
 - [Configure the Google Drive MCP server](https://developers.google.com/workspace/drive/api/guides/configure-mcp-server)
-- [azure-ai-agents MCP samples](https://github.com/Azure/azure-sdk-for-python/tree/main/sdk/ai/azure-ai-agents/samples)
+- [azure-ai-projects MCP samples](https://github.com/Azure/azure-sdk-for-python/tree/main/sdk/ai/azure-ai-projects/samples/agents/tools)
 
 ## License
 

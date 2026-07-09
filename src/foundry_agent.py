@@ -1,18 +1,26 @@
-"""Foundry agent wired to the Google Drive MCP server."""
+"""Foundry *prompt agent* wired to the Google Drive MCP server.
+
+Uses the new Microsoft Foundry projects API (``azure-ai-projects`` 2.x):
+
+* ``project.agents.create_version(...)`` with a ``PromptAgentDefinition``
+* an ``MCPTool`` that points at the Google Drive remote MCP server and carries
+  the user's Google access token as an ``Authorization`` header
+* the OpenAI-compatible **Responses API** (``conversations`` + ``responses``)
+  for multi-turn chat, including the MCP tool-approval round-trip.
+
+See: https://learn.microsoft.com/azure/foundry/agents/quickstarts/prompt-agent
+"""
 
 from __future__ import annotations
 
-import time
-from typing import Optional
+from typing import Any, List, Optional
 
 from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import MCPTool, PromptAgentDefinition
 from azure.identity import DefaultAzureCredential
-from azure.ai.agents.models import (
-    ListSortOrder,
-    McpTool,
-    RequiredMcpToolCall,
-    SubmitToolApprovalAction,
-    ToolApproval,
+from openai.types.responses.response_input_param import (
+    McpApprovalResponse,
+    ResponseInputParam,
 )
 
 from .config import Settings
@@ -26,60 +34,48 @@ INSTRUCTIONS = (
     "guessing."
 )
 
-_ACTIVE_STATUSES = ("queued", "in_progress", "requires_action")
-
 
 class GoogleDriveAgent:
-    """Create and drive a Foundry agent that can read the user's Google Drive."""
+    """Create and drive a Foundry prompt agent that can read the user's Drive."""
 
     def __init__(self, settings: Settings, verbose: bool = True):
         self.settings = settings
         self.verbose = verbose
-        self._client: Optional[AIProjectClient] = None
-        self._agents = None
-        self._mcp_tool: Optional[McpTool] = None
-        self._agent = None
-        self._thread = None
+        self._project: Optional[AIProjectClient] = None
+        self._openai: Any = None
+        self._agent: Any = None
+        self._conversation: Any = None
+        self._google_token: Optional[str] = None
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> "GoogleDriveAgent":
-        self._client = AIProjectClient(
+        self._project = AIProjectClient(
             endpoint=self.settings.project_endpoint,
             credential=DefaultAzureCredential(),
         )
-        self._agents = self._client.agents
+        self._openai = self._project.get_openai_client()
 
-        self._mcp_tool = McpTool(
-            server_label=self.settings.mcp_server_label,
-            server_url=self.settings.mcp_server_url,
-            allowed_tools=self.settings.allowed_tools,
-        )
-        if self.settings.require_approval == "never":
-            self._mcp_tool.set_approval_mode("never")
+        self._google_token = self._fresh_google_token()
+        self._agent = self._create_agent_version(self._google_token)
 
-        self._refresh_google_token()
-
-        self._agent = self._agents.create_agent(
-            model=self.settings.model_deployment_name,
-            name=self.settings.agent_name,
-            instructions=INSTRUCTIONS,
-            tools=self._mcp_tool.definitions,
-        )
-        self._log(f"Created agent: {self._agent.id}")
-        self._log(f"MCP server: {self._mcp_tool.server_label} -> {self._mcp_tool.server_url}")
-
-        self._thread = self._agents.threads.create()
-        self._log(f"Created thread: {self._thread.id}")
+        self._conversation = self._openai.conversations.create()
+        self._log(f"MCP server: {self.settings.mcp_server_label} -> {self.settings.mcp_server_url}")
+        self._log(f"Created conversation: {self._conversation.id}")
         return self
 
     def close(self) -> None:
         try:
-            if self._agent is not None and self._agents is not None:
-                self._agents.delete_agent(self._agent.id)
-                self._log("Deleted agent")
+            if self._agent is not None and self._project is not None:
+                self._project.agents.delete_version(
+                    agent_name=self._agent.name,
+                    agent_version=self._agent.version,
+                )
+                self._log("Deleted agent version")
+        except Exception as exc:  # best-effort cleanup
+            self._log(f"(cleanup) could not delete agent version: {exc}")
         finally:
-            if self._client is not None:
-                self._client.close()
+            if self._project is not None:
+                self._project.close()
 
     def __enter__(self) -> "GoogleDriveAgent":
         return self.start()
@@ -89,78 +85,103 @@ class GoogleDriveAgent:
 
     # -- conversation ------------------------------------------------------
     def ask(self, question: str) -> str:
-        """Send one question and return the agent's answer (same thread = memory)."""
+        """Send one question and return the agent's answer.
+
+        The Google access token expires (~1h). We refresh it before every turn
+        and, if it actually changed, publish a new agent *version* so the MCP
+        tool keeps a valid ``Authorization`` header.
+        """
         if self._agent is None:
             raise RuntimeError("Agent not started. Call start() first.")
 
-        # Refresh the Google token before every turn so long sessions don't
-        # break when the ~1h access token expires.
-        self._refresh_google_token()
+        token = self._fresh_google_token()
+        if token != self._google_token:
+            self._google_token = token
+            self._agent = self._create_agent_version(token)
 
-        self._agents.messages.create(
-            thread_id=self._thread.id, role="user", content=question
+        response = self._openai.responses.create(
+            conversation=self._conversation.id,
+            input=question,
+            extra_body=self._agent_reference(),
         )
-        run = self._agents.runs.create(
-            thread_id=self._thread.id,
-            agent_id=self._agent.id,
-            tool_resources=self._mcp_tool.resources,
-        )
-
-        while run.status in _ACTIVE_STATUSES:
-            time.sleep(1)
-            run = self._agents.runs.get(thread_id=self._thread.id, run_id=run.id)
-            if run.status == "requires_action" and isinstance(
-                run.required_action, SubmitToolApprovalAction
-            ):
-                self._approve_tool_calls(run)
-
-        if run.status == "failed":
-            return f"[run failed] {run.last_error}"
-
-        return self._latest_answer()
+        response = self._resolve_approvals(response)
+        return self._extract_answer(response)
 
     # -- internals ---------------------------------------------------------
-    def _refresh_google_token(self) -> None:
-        token = get_access_token(
+    def _agent_reference(self) -> dict:
+        return {
+            "agent_reference": {
+                "name": self._agent.name,
+                "type": "agent_reference",
+            }
+        }
+
+    def _create_agent_version(self, token: str) -> Any:
+        mcp_tool = MCPTool(
+            server_label=self.settings.mcp_server_label,
+            server_url=self.settings.mcp_server_url,
+            headers={"Authorization": f"Bearer {token}"},
+            require_approval=self.settings.require_approval,
+            allowed_tools=self.settings.allowed_tools or None,
+        )
+        agent = self._project.agents.create_version(
+            agent_name=self.settings.agent_name,
+            definition=PromptAgentDefinition(
+                model=self.settings.model_deployment_name,
+                instructions=INSTRUCTIONS,
+                tools=[mcp_tool],
+            ),
+        )
+        self._log(f"Created agent version: {agent.name} (v{agent.version})")
+        return agent
+
+    def _resolve_approvals(self, response: Any) -> Any:
+        """Auto-approve any MCP tool calls until the agent produces its answer."""
+        while True:
+            approvals: ResponseInputParam = []
+            for item in getattr(response, "output", []) or []:
+                if getattr(item, "type", None) == "mcp_approval_request" and getattr(
+                    item, "id", None
+                ):
+                    name = getattr(item, "name", None) or item.id
+                    self._log(f"  approving MCP tool call: {name}")
+                    approvals.append(
+                        McpApprovalResponse(
+                            type="mcp_approval_response",
+                            approve=True,
+                            approval_request_id=item.id,
+                        )
+                    )
+            if not approvals:
+                return response
+            response = self._openai.responses.create(
+                input=approvals,
+                previous_response_id=response.id,
+                extra_body=self._agent_reference(),
+            )
+
+    def _extract_answer(self, response: Any) -> str:
+        text = (getattr(response, "output_text", "") or "").strip()
+        if text:
+            return text
+        # No text came back -> surface any MCP error to make debugging easier.
+        errors: List[str] = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", "") == "mcp_call":
+                err = getattr(item, "error", None)
+                if err:
+                    errors.append(f"{getattr(item, 'name', 'mcp_call')}: {err}")
+        if errors:
+            return "[MCP tool error] " + " | ".join(errors)
+        return "(no response)"
+
+    def _fresh_google_token(self) -> str:
+        return get_access_token(
             self.settings.google_client_secrets_file,
             self.settings.google_token_file,
             oauth_port=self.settings.google_oauth_port,
             interactive=False,
         )
-        self._mcp_tool.update_headers("Authorization", f"Bearer {token}")
-
-    def _approve_tool_calls(self, run) -> None:
-        tool_calls = run.required_action.submit_tool_approval.tool_calls or []
-        if not tool_calls:
-            self._agents.runs.cancel(thread_id=self._thread.id, run_id=run.id)
-            return
-
-        approvals = []
-        for call in tool_calls:
-            if isinstance(call, RequiredMcpToolCall):
-                self._log(f"  approving MCP tool call: {getattr(call, 'name', call.id)}")
-                approvals.append(
-                    ToolApproval(
-                        tool_call_id=call.id,
-                        approve=True,
-                        headers=self._mcp_tool.headers,
-                    )
-                )
-        if approvals:
-            self._agents.runs.submit_tool_outputs(
-                thread_id=self._thread.id, run_id=run.id, tool_approvals=approvals
-            )
-
-    def _latest_answer(self) -> str:
-        messages = self._agents.messages.list(
-            thread_id=self._thread.id, order=ListSortOrder.ASCENDING
-        )
-        answer = ""
-        for msg in messages:
-            # Capture the most recent non-user (assistant/agent) text message.
-            if msg.text_messages and msg.role != "user":
-                answer = msg.text_messages[-1].text.value
-        return answer or "(no response)"
 
     def _log(self, message: str) -> None:
         if self.verbose:

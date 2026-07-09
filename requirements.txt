@@ -1,13 +1,15 @@
-# --- Azure Foundry Agent Service SDK ---------------------------------------
-# Pre-release pins are REQUIRED: the MCP tool with custom auth headers and
-# tool-call approval lives in azure-ai-agents >= 1.2.0b3, and azure-ai-projects
-# 1.1.0b4 is the matching project client that still exposes `.agents`.
-# (azure-ai-projects 2.x replaced `.agents` with an OpenAI-compatible surface.)
-# Exact pins let pip install these pre-releases without a global --pre flag,
-# so transitive dependencies still resolve to stable versions.
-azure-ai-projects==1.1.0b4
-azure-ai-agents==1.2.0b6
+# --- Microsoft Foundry Agent Service SDK (new Foundry projects API) ---------
+# azure-ai-projects 2.x exposes the new agents API used here:
+#   * project.agents.create_version(...) + PromptAgentDefinition
+#   * project.get_openai_client() -> OpenAI-compatible Responses API
+#   * MCPTool with inline auth `headers` and tool-call approval
+# Docs: https://learn.microsoft.com/azure/foundry/agents/quickstarts/prompt-agent
+azure-ai-projects>=2.3.0,<3
 azure-identity>=1.24,<2
+# The Responses API surface (conversations/responses + MCP approval types)
+# builds on the OpenAI client. azure-ai-projects 2.x pulls this in, but we pin a
+# floor because we import `openai.types.responses.response_input_param`.
+openai>=1.109
 
 # --- Google OAuth 2.0 -------------------------------------------------------
 # Used to obtain and refresh the Google Drive access token locally.
