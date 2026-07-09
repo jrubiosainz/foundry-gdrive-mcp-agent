@@ -11,9 +11,13 @@ from dotenv import load_dotenv
 # Load variables from a local .env file if present. Real env vars win.
 load_dotenv()
 
-# Official Google Drive remote MCP server endpoint (Developer Preview).
-# https://developers.google.com/workspace/drive/api/guides/configure-mcp-server
-DEFAULT_MCP_SERVER_URL = "https://drivemcp.googleapis.com/mcp/v1"
+# URL of the MCP server the agent talks to. In this project that is OUR OWN
+# self-hosted Google Drive MCP server running on Azure App Service, e.g.
+#   https://<app>.azurewebsites.net/mcp?key=<shared-secret>
+# The URL carries a shared secret, so it is provided via the MCP_SERVER_URL env
+# var (never hard-coded / committed). Google's hosted drivemcp.googleapis.com is
+# NOT used because it denies data-plane calls for personal Google accounts.
+DEFAULT_MCP_SERVER_URL = ""
 DEFAULT_MCP_SERVER_LABEL = "google_drive"
 
 # Scopes required by the Google Drive MCP server.

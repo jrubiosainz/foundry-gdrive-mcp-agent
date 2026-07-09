@@ -4,6 +4,7 @@ Commands:
     python main.py auth          Run the Google OAuth consent flow and cache a token.
     python main.py ask "..."     Ask a single question and print the answer.
     python main.py chat          Interactive chat loop (default when no command given).
+    python main.py create-agent  Create/persist the agent version for the Foundry portal.
 """
 
 from __future__ import annotations
@@ -34,6 +35,19 @@ def cmd_ask(settings: Settings, question: str) -> None:
         print(f"A: {agent.ask(question)}")
 
 
+def cmd_create_agent(settings: Settings) -> None:
+    """Create/persist the agent version (for use from the Foundry portal)."""
+    agent = GoogleDriveAgent(settings)
+    try:
+        handle = agent.create_agent()
+        print("\nAgent created and persisted in your Foundry project.")
+        print(f"  Name    : {handle.name}")
+        print(f"  Version : v{handle.version}")
+        print("\nOpen it in the Foundry portal (Agents) and start chatting.")
+    finally:
+        agent.close()
+
+
 def cmd_chat(settings: Settings) -> None:
     print("Google Drive agent ready. Ask about your documents. Type 'exit' to quit.\n")
     with GoogleDriveAgent(settings) as agent:
@@ -59,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser = sub.add_parser("ask", help="Ask a single question.")
     ask_parser.add_argument("question", nargs="+", help="The question to ask.")
     sub.add_parser("chat", help="Interactive chat loop (default).")
+    sub.add_parser(
+        "create-agent",
+        help="Create/persist the agent version for use from the Foundry portal.",
+    )
     return parser
 
 
@@ -70,6 +88,8 @@ def main() -> None:
         cmd_auth(settings)
     elif args.command == "ask":
         cmd_ask(settings, " ".join(args.question))
+    elif args.command == "create-agent":
+        cmd_create_agent(settings)
     else:
         cmd_chat(settings)
 

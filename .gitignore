@@ -12,6 +12,11 @@ __pycache__/
 credentials.json
 token.json
 *.pem
+mcp_secret.txt
+
+# Build / deploy artifacts
+webapp_deploy.zip
+*.zip
 
 # OS / editor
 .DS_Store
