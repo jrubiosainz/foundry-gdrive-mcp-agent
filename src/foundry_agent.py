@@ -3,12 +3,19 @@
 Uses the new Microsoft Foundry projects API (``azure-ai-projects`` 2.x):
 
 * ``project.agents.create_version(...)`` with a ``PromptAgentDefinition``
-* an ``MCPTool`` that points at the Google Drive remote MCP server and carries
-  the user's Google access token as an ``Authorization`` header
+* an ``MCPTool`` that points at the Google Drive remote MCP server. The user's
+  Google OAuth access token is passed in the MCP tool ``authorization`` field.
+  (Foundry rejects putting the token in ``headers`` -> error
+  ``Headers that can include sensitive information are not allowed``.) You can
+  instead point the tool at a Foundry **project connection** or the native
+  ``connector_googledrive`` connector -- see ``MCP_PROJECT_CONNECTION_ID`` /
+  ``MCP_CONNECTOR_ID`` in ``config.py``.
 * the OpenAI-compatible **Responses API** (``conversations`` + ``responses``)
   for multi-turn chat, including the MCP tool-approval round-trip.
 
-See: https://learn.microsoft.com/azure/foundry/agents/quickstarts/prompt-agent
+See:
+* https://learn.microsoft.com/azure/foundry/agents/quickstarts/prompt-agent
+* https://learn.microsoft.com/azure/foundry/agents/how-to/mcp-authentication
 """
 
 from __future__ import annotations
@@ -46,6 +53,11 @@ class GoogleDriveAgent:
         self._agent: Any = None
         self._conversation: Any = None
         self._google_token: Optional[str] = None
+        # When a project connection carries the credential, we don't pass the
+        # Google token inline and therefore never need to republish a version.
+        self._uses_inline_token: bool = not bool(
+            self.settings.mcp_project_connection_id
+        )
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> "GoogleDriveAgent":
@@ -55,11 +67,15 @@ class GoogleDriveAgent:
         )
         self._openai = self._project.get_openai_client()
 
-        self._google_token = self._fresh_google_token()
+        if self._uses_inline_token:
+            self._google_token = self._fresh_google_token()
         self._agent = self._create_agent_version(self._google_token)
 
         self._conversation = self._openai.conversations.create()
-        self._log(f"MCP server: {self.settings.mcp_server_label} -> {self.settings.mcp_server_url}")
+        self._log(
+            f"MCP server: {self.settings.mcp_server_label} -> "
+            f"{self._mcp_target_description()}"
+        )
         self._log(f"Created conversation: {self._conversation.id}")
         return self
 
@@ -87,17 +103,19 @@ class GoogleDriveAgent:
     def ask(self, question: str) -> str:
         """Send one question and return the agent's answer.
 
-        The Google access token expires (~1h). We refresh it before every turn
-        and, if it actually changed, publish a new agent *version* so the MCP
-        tool keeps a valid ``Authorization`` header.
+        When the Google token is passed inline it expires (~1h). We refresh it
+        before every turn and, if it actually changed, publish a new agent
+        *version* so the MCP tool keeps a valid ``authorization`` token. When a
+        project connection carries the credential, no refresh is needed here.
         """
         if self._agent is None:
             raise RuntimeError("Agent not started. Call start() first.")
 
-        token = self._fresh_google_token()
-        if token != self._google_token:
-            self._google_token = token
-            self._agent = self._create_agent_version(token)
+        if self._uses_inline_token:
+            token = self._fresh_google_token()
+            if token != self._google_token:
+                self._google_token = token
+                self._agent = self._create_agent_version(token)
 
         response = self._openai.responses.create(
             conversation=self._conversation.id,
@@ -116,14 +134,47 @@ class GoogleDriveAgent:
             }
         }
 
-    def _create_agent_version(self, token: str) -> Any:
-        mcp_tool = MCPTool(
-            server_label=self.settings.mcp_server_label,
-            server_url=self.settings.mcp_server_url,
-            headers={"Authorization": f"Bearer {token}"},
-            require_approval=self.settings.require_approval,
-            allowed_tools=self.settings.allowed_tools or None,
-        )
+    def _mcp_target_description(self) -> str:
+        if self.settings.mcp_project_connection_id:
+            return f"connection {self.settings.mcp_project_connection_id}"
+        if self.settings.mcp_connector_id:
+            return f"connector {self.settings.mcp_connector_id}"
+        return self.settings.mcp_server_url
+
+    def _build_mcp_tool(self, token: Optional[str]) -> MCPTool:
+        """Build the MCP tool for one of three auth modes.
+
+        1. project connection  -> ``project_connection_id`` (credential lives in
+           the Foundry connection; token is NOT sent from here).
+        2. native connector    -> ``connector_id`` (e.g. ``connector_googledrive``)
+           plus the user's Google token in ``authorization``.
+        3. inline (default)    -> ``server_url`` plus the user's Google token in
+           ``authorization``. The token goes in the dedicated ``authorization``
+           field, never in ``headers`` (Foundry blocks sensitive headers).
+        """
+        kwargs: dict = {
+            "server_label": self.settings.mcp_server_label,
+            "require_approval": self.settings.require_approval,
+            "allowed_tools": self.settings.allowed_tools or None,
+        }
+
+        if self.settings.mcp_project_connection_id:
+            # Sample: sample_agent_mcp_with_project_connection.py passes both.
+            kwargs["server_url"] = self.settings.mcp_server_url
+            kwargs["project_connection_id"] = self.settings.mcp_project_connection_id
+        elif self.settings.mcp_connector_id:
+            kwargs["connector_id"] = self.settings.mcp_connector_id
+            if token:
+                kwargs["authorization"] = token
+        else:
+            kwargs["server_url"] = self.settings.mcp_server_url
+            if token:
+                kwargs["authorization"] = token
+
+        return MCPTool(**kwargs)
+
+    def _create_agent_version(self, token: Optional[str]) -> Any:
+        mcp_tool = self._build_mcp_tool(token)
         agent = self._project.agents.create_version(
             agent_name=self.settings.agent_name,
             definition=PromptAgentDefinition(
@@ -164,13 +215,21 @@ class GoogleDriveAgent:
         text = (getattr(response, "output_text", "") or "").strip()
         if text:
             return text
-        # No text came back -> surface any MCP error to make debugging easier.
+        # No text came back -> surface any MCP / OAuth signal to ease debugging.
         errors: List[str] = []
         for item in getattr(response, "output", []) or []:
-            if getattr(item, "type", "") == "mcp_call":
+            itype = getattr(item, "type", "") or ""
+            if itype == "mcp_call":
                 err = getattr(item, "error", None)
                 if err:
                     errors.append(f"{getattr(item, 'name', 'mcp_call')}: {err}")
+            elif itype == "oauth_consent_request":
+                link = getattr(item, "consent_link", None)
+                if link:
+                    errors.append(
+                        "OAuth consent required. Open this link to authorize, "
+                        f"then ask again: {link}"
+                    )
         if errors:
             return "[MCP tool error] " + " | ".join(errors)
         return "(no response)"

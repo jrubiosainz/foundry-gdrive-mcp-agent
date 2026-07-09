@@ -32,7 +32,7 @@ flowchart LR
 2. It publishes a Foundry **prompt agent** (`agents.create_version`) whose only
    tool is the **Google Drive MCP server**.
 3. On every turn, the app injects a **fresh Google access token** as the
-   `Authorization: Bearer …` header the MCP server expects.
+   MCP tool's `authorization` field — the token the Drive MCP server expects.
 4. It chats through the OpenAI-compatible **Responses API** over a
    `conversation`, so multi-turn context is kept. The model decides when to call
    Drive tools (`search_files`, `read_file_content`, …); the service runs them
@@ -42,10 +42,13 @@ flowchart LR
 
 Google offers the Drive MCP server as a **remote OAuth-protected endpoint**.
 "First‑class" clients like Antigravity and Claude perform the interactive OAuth
-handshake for you. **Foundry's MCP tool does not** — it only forwards static
-HTTP headers. So this project takes responsibility for OAuth itself: it runs the
-consent flow locally, then passes the resulting bearer token to Foundry via the
-MCP tool headers. Google access tokens expire (~1 hour), so the app refreshes
+handshake for you. **Foundry's MCP tool doesn't run that interactive handshake** —
+your application must obtain the token. So this project takes responsibility for
+OAuth itself: it runs the consent flow locally, then passes the resulting access
+token to Foundry in the MCP tool's dedicated **`authorization`** field. (Foundry
+**rejects** tokens placed in `headers` — you get
+`Headers that can include sensitive information are not allowed`.) Google access
+tokens expire (~1 hour), so the app refreshes
 the token before every turn using the cached refresh token.
 
 > This is a **demo / developer** pattern. For production you'd centralize token
@@ -261,6 +264,13 @@ foundry-gdrive-mcp-agent/
   (`azure-ai-projects>=2.3.0`, which pulls in `openai`). It is **not** compatible
   with `azure-ai-projects` 1.x. Reinstall into a clean venv with
   `pip install -r requirements.txt`.
+- **`invalid_payload` / "Headers that can include sensitive information are not
+  allowed in the headers property for MCP tools. Use project_connection_id
+  instead."** → an older build put the Google token in the MCP tool `headers`.
+  The current code sends it in the dedicated MCP tool `authorization` field
+  instead, which Foundry allows. `git pull` and reinstall (`pip install -r
+  requirements.txt`). Advanced: to store the credential server-side instead, set
+  `MCP_PROJECT_CONNECTION_ID` to a Foundry connection you create in the portal.
 - **`server_error` / "Sorry, something went wrong" on a run** → almost always the
   MCP call failing server-side: an expired/invalid Google token, the Drive/DriveMCP
   APIs not enabled, or the OAuth client type being rejected (see the Desktop-app

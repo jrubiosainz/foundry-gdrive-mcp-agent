@@ -34,6 +34,11 @@ class Settings:
     model_deployment_name: str
     mcp_server_url: str = DEFAULT_MCP_SERVER_URL
     mcp_server_label: str = DEFAULT_MCP_SERVER_LABEL
+    # Optional alternatives to passing the Google token inline (see README):
+    #   mcp_project_connection_id -> credential stored in a Foundry connection
+    #   mcp_connector_id          -> native connector, e.g. "connector_googledrive"
+    mcp_project_connection_id: str = ""
+    mcp_connector_id: str = ""
     google_client_secrets_file: str = "credentials.json"
     google_token_file: str = "token.json"
     google_oauth_port: int = 0
@@ -72,6 +77,10 @@ class Settings:
             mcp_server_label=os.environ.get(
                 "MCP_SERVER_LABEL", DEFAULT_MCP_SERVER_LABEL
             ).strip(),
+            mcp_project_connection_id=os.environ.get(
+                "MCP_PROJECT_CONNECTION_ID", ""
+            ).strip(),
+            mcp_connector_id=os.environ.get("MCP_CONNECTOR_ID", "").strip(),
             google_client_secrets_file=os.environ.get(
                 "GOOGLE_OAUTH_CLIENT_SECRETS", "credentials.json"
             ).strip(),
