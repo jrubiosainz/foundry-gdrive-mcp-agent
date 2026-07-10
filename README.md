@@ -143,6 +143,12 @@ the MCP web app.
 > your Foundry region, pick another region for the web app (this repo uses
 > **westus2**). The web app does **not** need to be co-located with Foundry.
 
+> **Use a plan with "Always On" (B1+), not Free (F1).** On Free/Shared tiers the
+> app **idles out and cold-starts (~20 s)** on the next request. Foundry's MCP
+> connector times out on that cold start and the agent run fails with
+> `external_connector_error … Server returned 424`. **Basic (B1)** supports
+> **Always On**, which keeps the container warm so the handshake is instant.
+
 ### 2.1 Provision (one time)
 
 ```bash
@@ -150,10 +156,11 @@ RG=Google-Drive
 APP=gdrive-mcp-$RANDOM          # must be globally unique
 REGION=westus2
 
-az appservice plan create -g $RG -n gdrive-mcp-plan --is-linux --sku F1 --location $REGION
+az appservice plan create -g $RG -n gdrive-mcp-plan --is-linux --sku B1 --location $REGION
 az webapp create -g $RG -p gdrive-mcp-plan -n $APP --runtime "PYTHON:3.11"
 az webapp config set -g $RG -n $APP --startup-file "gunicorn --bind=0.0.0.0:8000 --timeout 600 app:app"
 az webapp config appsettings set -g $RG -n $APP --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true
+az webapp config set -g $RG -n $APP --always-on true      # keep warm -> no cold-start 424
 az webapp update -g $RG -n $APP --https-only true
 ```
 
@@ -233,8 +240,9 @@ python main.py ask "¿qué documentos tengo en drive?"
 python main.py chat                         # interactive loop
 ```
 
-> Your signed-in identity needs a **Foundry data-plane role** (e.g. **Azure AI
-> User**) on the Foundry account — *Owner alone is not enough* for data calls.
+> Your signed-in identity needs a **Foundry data-plane role** on the Foundry
+> account — e.g. **Azure AI Developer** + **Cognitive Services User** — *Owner
+> alone is not enough* for data calls.
 
 ---
 
@@ -307,8 +315,16 @@ foundry-gdrive-mcp-agent/
 
 ## Troubleshooting
 
+- **Agent run fails with `external_connector_error` / `Server returned 424`** →
+  Foundry's MCP connector couldn't reach the App Service in time — almost always a
+  **cold start** on a Free/Shared plan. Move the app to **B1** and enable
+  **Always On** (`az webapp config set --always-on true`), then retry. Confirm the
+  app is warm first: `curl https://<app>.azurewebsites.net/` should return in <1 s.
+  (Also restart-related: pushing app settings restarts the container, so wait a few
+  seconds after `set_appservice_secrets.ps1` before running the agent.)
 - **`DefaultAzureCredential` / data-plane 401–403** → `az login`; assign your
-  identity **Azure AI User** on the Foundry account (Owner is control-plane only).
+  identity a Foundry **data-plane** role on the account — e.g. **Azure AI
+  Developer** + **Cognitive Services User** (Owner alone is control-plane only).
 - **App Service create fails: "Total VMs: 0"** → no App Service quota in that
   region; deploy the web app to another region (e.g. `westus2`). It's independent
   of the Foundry region.
