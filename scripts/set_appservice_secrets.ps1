@@ -26,7 +26,8 @@
 [CmdletBinding()]
 param(
     [string]$ResourceGroup = "Google-Drive",
-    [string]$AppName       = "gdrive-mcp-dwavo67s",
+    [Parameter(Mandatory = $true)]
+    [string]$AppName,
     [string]$Subscription  = "",
     [string]$CredentialsFile = "credentials.json",
     [string]$TokenFile       = "token.json"
